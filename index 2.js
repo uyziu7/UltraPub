@@ -7,6 +7,7 @@ const {
     Client,
     GatewayIntentBits,
     PermissionFlagsBits,
+    SlashCommandBuilder,
     ChannelType,
     EmbedBuilder,
     ActionRowBuilder,
@@ -16,6 +17,8 @@ const {
     TextInputBuilder,
     TextInputStyle,
     StringSelectMenuBuilder,
+    ChannelSelectMenuBuilder,
+    RoleSelectMenuBuilder,
     UserSelectMenuBuilder,
     MessageFlags
 } = require('discord.js');
@@ -38,7 +41,163 @@ const client = new Client({
 // CONFIGURATION
 // ============================================================
 
-const PREFIX = '!';
+const SLASH_COMMANDS = [
+    new SlashCommandBuilder()
+        .setName('promotion')
+        .setDescription('Modifier les grades d’un membre sans lui envoyer de message.')
+        .addStringOption(option =>
+            option.setName('id').setDescription('ID Discord ou mention du membre à promouvoir.').setRequired(true)
+        )
+        .addRoleOption(option =>
+            option.setName('grade-actuel').setDescription('Grade à remplacer ou à conserver.').setRequired(true)
+        )
+        .addRoleOption(option =>
+            option.setName('nouveau-grade').setDescription('Grade à ajouter au membre.').setRequired(true)
+        )
+        .addStringOption(option =>
+            option.setName('mode').setDescription('Remplacer le grade actuel ou ajouter le nouveau grade.').setRequired(true)
+                .addChoices(
+                    { name: 'Remplacer le grade actuel', value: 'remplacer' },
+                    { name: 'Ajouter sans supprimer le grade actuel', value: 'ajouter' }
+                )
+        ),
+    new SlashCommandBuilder()
+        .setName('env-form-rc')
+        .setDescription('Envoyer le formulaire de recrutement dans un salon.')
+        .addChannelOption(option =>
+            option.setName('salon').setDescription('Salon où publier le formulaire.').addChannelTypes(ChannelType.GuildText).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('env-form-chgd')
+        .setDescription('Envoyer le formulaire de changement de grade dans un salon.')
+        .addChannelOption(option =>
+            option.setName('salon').setDescription('Salon où publier le formulaire.').addChannelTypes(ChannelType.GuildText).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('event')
+        .setDescription('Définir le cooldown événementiel en minutes.')
+        .addIntegerOption(option =>
+            option.setName('minutes').setDescription('Cooldown à appliquer dans les salons publicitaires.').setMinValue(1).setMaxValue(360).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('reset-event')
+        .setDescription('Restaurer les cooldowns par défaut configurés pour les salons publicitaires.'),
+    new SlashCommandBuilder()
+        .setName('help')
+        .setDescription('Afficher les commandes disponibles.'),
+    new SlashCommandBuilder()
+        .setName('config')
+        .setDescription('Ouvrir la configuration interactive du serveur.'),
+    new SlashCommandBuilder()
+        .setName('message-boutique')
+        .setDescription('Publier le message de la boutique.'),
+    new SlashCommandBuilder()
+        .setName('panel-dmdrank')
+        .setDescription('Alias de /env-form-chgd.')
+        .addChannelOption(option =>
+            option.setName('salon').setDescription('Salon où publier le formulaire.').addChannelTypes(ChannelType.GuildText).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('panel-recrutement')
+        .setDescription('Alias de /env-form-rc.')
+        .addChannelOption(option =>
+            option.setName('salon').setDescription('Salon où publier le formulaire.').addChannelTypes(ChannelType.GuildText).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('panel-recrutemtent')
+        .setDescription('Ancien alias de /env-form-rc.')
+        .addChannelOption(option =>
+            option.setName('salon').setDescription('Salon où publier le formulaire.').addChannelTypes(ChannelType.GuildText).setRequired(true)
+        ),
+    new SlashCommandBuilder()
+        .setName('staff-stat')
+        .setDescription('Afficher les statistiques du staff.'),
+    new SlashCommandBuilder()
+        .setName('partenariat')
+        .setDescription('Gérer les partenariats.')
+        .addSubcommand(subcommand =>
+            subcommand.setName('send').setDescription('Ouvrir le formulaire de création d’un partenariat.')
+        ),
+    new SlashCommandBuilder()
+        .setName('stats-pub')
+        .setDescription('Afficher les statistiques de vérification des publicités.'),
+    new SlashCommandBuilder()
+        .setName('statspub')
+        .setDescription('Ancien alias de /stats-pub.')
+].map(command => command.setDefaultMemberPermissions(null).toJSON());
+
+const CONFIG_FILE = path.join(__dirname, 'ultrapub-config.json');
+const DEFAULT_GUILD_CONFIG = {
+    roleByCommand: {},
+    messages: {},
+    defaultCooldowns: {}
+};
+const guildConfig = {};
+
+function getGuildConfig(guildId) {
+    if (!guildConfig[guildId]) {
+        guildConfig[guildId] = {
+            roleByCommand: {},
+            messages: {},
+            defaultCooldowns: {}
+        };
+    }
+
+    return guildConfig[guildId];
+}
+
+function loadGuildConfig() {
+    try {
+        if (fs.existsSync(CONFIG_FILE)) {
+            const loaded = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+
+            for (const [guildId, config] of Object.entries(loaded)) {
+                guildConfig[guildId] = {
+                    ...DEFAULT_GUILD_CONFIG,
+                    ...config,
+                    roleByCommand: config.roleByCommand || {},
+                    messages: config.messages || {},
+                    defaultCooldowns: config.defaultCooldowns || {}
+                };
+            }
+        }
+    } catch (error) {
+        console.error('❌ Impossible de lire ultrapub-config.json :', error);
+    }
+}
+
+function saveGuildConfig() {
+    try {
+        const tmp = `${CONFIG_FILE}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(guildConfig, null, 2));
+        fs.renameSync(tmp, CONFIG_FILE);
+    } catch (error) {
+        console.error('❌ Impossible d’écrire ultrapub-config.json :', error);
+    }
+}
+
+loadGuildConfig();
+
+const ACCESS_CONTROL_COMMANDS = SLASH_COMMANDS
+    .map(command => command.name)
+    .filter(name => name !== 'config');
+
+function hasCommandAccess(interaction, member) {
+    if (
+        interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+        member?.permissions.has(PermissionFlagsBits.Administrator)
+    ) {
+        return true;
+    }
+
+    const allowedRoleId =
+        getGuildConfig(interaction.guildId).roleByCommand[interaction.commandName];
+
+    return Boolean(
+        allowedRoleId &&
+        member?.roles.cache.has(allowedRoleId)
+    );
+}
 
 const LOG_CHANNEL_ID = '1547692905240723578';
 const AVIS_CHANNEL_ID = '1548258506182754324';
@@ -83,7 +242,11 @@ const EVENT_FILE = path.join(__dirname, 'event-cooldowns.json');
 
 // active  : true si l'événement est en cours
 // saved   : { idSalon: cooldownOriginalEnSecondes }
-let eventState = { active: false, saved: {} };
+let eventState = {
+    active: false,
+    saved: {},
+    cooldownSeconds: EVENT_COOLDOWN_SECONDS
+};
 
 function loadEventState() {
     try {
@@ -91,7 +254,10 @@ function loadEventState() {
             const data = JSON.parse(fs.readFileSync(EVENT_FILE, 'utf8'));
             eventState = {
                 active: Boolean(data.active),
-                saved: data.saved && typeof data.saved === 'object' ? data.saved : {}
+                saved: data.saved && typeof data.saved === 'object' ? data.saved : {},
+                cooldownSeconds: Number.isInteger(data.cooldownSeconds)
+                    ? data.cooldownSeconds
+                    : EVENT_COOLDOWN_SECONDS
             };
         }
     } catch (error) {
@@ -859,6 +1025,36 @@ client.once(
             of client.guilds.cache.values()
         ) {
 
+            try {
+                const registeredCommands =
+                    await guild.commands.fetch();
+
+                const obsoleteEventCommand =
+                    registeredCommands.find(command => command.name === 'event-1m');
+
+                if (obsoleteEventCommand) {
+                    await obsoleteEventCommand.delete();
+                }
+
+                for (const commandData of SLASH_COMMANDS) {
+                    const existingCommand =
+                        registeredCommands.find(
+                            command => command.name === commandData.name
+                        );
+
+                    if (existingCommand) {
+                        await existingCommand.edit(commandData);
+                    } else {
+                        await guild.commands.create(commandData);
+                    }
+                }
+            } catch (error) {
+                console.error(
+                    `⚠️ Enregistrement des commandes impossible (${guild.name}) :`,
+                    error
+                );
+            }
+
             await guild.members
                 .fetch()
                 .catch(error => {
@@ -984,9 +1180,7 @@ client.on(
 // MESSAGE CREATE
 // ============================================================
 
-client.on(
-    'messageCreate',
-    async message => {
+const handleMessageCreate = async message => {
 
         try {
 
@@ -1001,21 +1195,25 @@ client.on(
             // STATISTIQUES STAFF
             // ====================================================
 
-            getStaffStats(
-                message.author.id
-            ).messages++;
+            if (!message.__slashCommand) {
+                getStaffStats(
+                    message.author.id
+                ).messages++;
+            }
 
             // ====================================================
             // PUBLICITÉS
             // ====================================================
 
             if (
+                !message.__slashCommand &&
                 message.channel.parentId ===
                 PUB_CATEGORY_ID
             ) {
 
                 await message.reply({
                     content:
+                        getGuildConfig(message.guild.id).messages.pub ||
                         'Merci de poster votre publicité ! Assure-toi qu’elle respecte les **Règles de Discord** et le **Règlement d’Ultra Pub**.'
                 }).catch(error => {
 
@@ -1170,24 +1368,11 @@ client.on(
             // COMMANDES
             // ====================================================
 
-            if (
-                !message.content.startsWith(
-                    PREFIX
-                )
-            ) {
+            if (!message.__slashCommand) {
                 return;
             }
 
-            const args =
-                message.content
-                    .slice(
-                        PREFIX.length
-                    )
-                    .trim()
-                    .split(/\s+/);
-
-            const commandName =
-                args.shift()?.toLowerCase();
+            const { commandName, args } = message.__slashCommand;
 
             if (!commandName) {
                 return;
@@ -1204,18 +1389,16 @@ client.on(
                     );
 
             // ====================================================
-            // ÉVÉNEMENT : COOLDOWN 1 MINUTE SUR LA CATÉGORIE PUB
+            // ÉVÉNEMENT : COOLDOWN PERSONNALISABLE
             // ====================================================
 
             if (
-                commandName ===
-                'event-1m'
+                commandName === 'event' ||
+                commandName === 'reset-event'
             ) {
 
                 if (
-                    !executor?.permissions.has(
-                        PermissionFlagsBits.ManageMessages
-                    )
+                    !hasCommandAccess(message.__slashCommand.interaction, executor)
                 ) {
 
                     return message.reply(
@@ -1237,101 +1420,58 @@ client.on(
                     );
                 }
 
+                const isReset = commandName === 'reset-event';
+                const status = await message.reply(
+                    isReset
+                        ? '⏳ Restauration des cooldowns par défaut...'
+                        : `⏳ Application du cooldown événementiel de **${message.__slashCommand.minutes} minute(s)**...`
+                );
+                const config = getGuildConfig(message.guild.id);
                 let success = 0;
                 let failed = 0;
 
-                // ------------------------------------------------
-                // ACTIVATION
-                // ------------------------------------------------
-
-                if (!eventState.active) {
-
-                    const status =
-                        await message.reply(
-                            `⏳ Activation de l’événement sur **${channels.size}** salons...`
-                        );
-
-                    // On sauvegarde AVANT de modifier quoi que ce soit
+                if (!isReset && !eventState.active) {
                     eventState.saved = {};
-
                     for (const channel of channels.values()) {
-                        eventState.saved[channel.id] =
-                            channel.rateLimitPerUser || 0;
+                        eventState.saved[channel.id] = channel.rateLimitPerUser || 0;
                     }
-
-                    eventState.active = true;
-                    saveEventState();
-
-                    for (const channel of channels.values()) {
-
-                        try {
-                            await channel.setRateLimitPerUser(
-                                EVENT_COOLDOWN_SECONDS,
-                                'Événement : cooldown 1 minute'
-                            );
-                            success++;
-                        } catch (error) {
-                            failed++;
-                            console.error(
-                                `❌ Event : impossible de modifier #${channel.name} :`,
-                                error.message
-                            );
-                        }
-                    }
-
-                    return status.edit(
-                        `🎉 **Événement activé !** Cooldown de **1 minute** appliqué à **${success}** salons` +
-                        (failed ? ` (❌ ${failed} échec(s), voir la console)` : '') +
-                        `.\nRefais \`${PREFIX}event-1m\` pour revenir aux anciens cooldowns.`
-                    );
                 }
 
-                // ------------------------------------------------
-                // DÉSACTIVATION (restauration des anciens cooldowns)
-                // ------------------------------------------------
+                if (!isReset) {
+                    eventState.active = true;
+                    eventState.cooldownSeconds = message.__slashCommand.minutes * 60;
+                }
 
-                const status =
-                    await message.reply(
-                        '⏳ Fin de l’événement, restauration des anciens cooldowns...'
-                    );
-
-                for (
-                    const [channelId, oldCooldown]
-                    of Object.entries(eventState.saved)
-                ) {
-
-                    const channel =
-                        message.guild.channels.cache.get(
-                            channelId
-                        );
-
-                    // Salon supprimé depuis : rien à restaurer
-                    if (!channel) {
-                        continue;
-                    }
+                for (const channel of channels.values()) {
+                    const cooldown = isReset
+                        ? Number(config.defaultCooldowns[channel.id] ?? eventState.saved[channel.id] ?? 0)
+                        : eventState.cooldownSeconds;
 
                     try {
                         await channel.setRateLimitPerUser(
-                            oldCooldown,
-                            'Fin de l’événement : cooldown restauré'
+                            cooldown,
+                            isReset ? 'Restauration du cooldown par défaut' : 'Cooldown événementiel'
                         );
                         success++;
                     } catch (error) {
                         failed++;
                         console.error(
-                            `❌ Event : impossible de restaurer #${channel.name} :`,
+                            `❌ Event : impossible de modifier #${channel.name} :`,
                             error.message
                         );
                     }
                 }
 
-                eventState.active = false;
-                eventState.saved = {};
+                if (isReset) {
+                    eventState.active = false;
+                    eventState.saved = {};
+                    eventState.cooldownSeconds = EVENT_COOLDOWN_SECONDS;
+                }
                 saveEventState();
 
                 return status.edit(
-                    `✅ **Événement terminé.** Anciens cooldowns restaurés sur **${success}** salons` +
-                    (failed ? ` (❌ ${failed} échec(s), voir la console)` : '') +
+                    `${isReset ? '✅ Cooldowns par défaut restaurés' : '🎉 Événement activé'} sur **${success}** salons` +
+                    (failed ? ` (${failed} échec(s), voir la console)` : '') +
                     '.'
                 );
             }
@@ -1534,14 +1674,12 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
             // ====================================================
 
             if (
-                commandName ===
-                'panel-dmdrank'
+                commandName === 'env-form-chgd' ||
+                commandName === 'panel-dmdrank'
             ) {
 
                 if (
-                    !executor?.permissions.has(
-                        PermissionFlagsBits.ManageMessages
-                    )
+                    !hasCommandAccess(message.__slashCommand.interaction, executor)
                 ) {
 
                     return message.reply(
@@ -1558,6 +1696,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                             '#5865F2'
                         )
                         .setDescription(
+                            getGuildConfig(message.guild.id).messages['changement-grade'] ||
                             'Tu souhaites demander un changement de grade dans le staff ?\n\n' +
                             'Ce formulaire concerne uniquement les grades suivants :\n' +
                             '• **Modo**\n' +
@@ -1608,16 +1747,13 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
             // ====================================================
 
             if (
-                commandName ===
-                    'panel-recrutemtent' ||
-                commandName ===
-                    'panel-recrutement'
+                    commandName === 'env-form-rc' ||
+                    commandName === 'panel-recrutemtent' ||
+                    commandName === 'panel-recrutement'
             ) {
 
                 if (
-                    !executor?.permissions.has(
-                        PermissionFlagsBits.ManageMessages
-                    )
+                    !hasCommandAccess(message.__slashCommand.interaction, executor)
                 ) {
 
                     return message.reply(
@@ -1634,6 +1770,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                             '📋・RECRUTEMENT — ULTRA PUB'
                         )
                         .setDescription(
+                            getGuildConfig(message.guild.id).messages.recrutement ||
                             'Ultra Pub ouvre actuellement plusieurs postes au sein de son équipe.\n\n' +
 
                             'Nous recherchons des personnes sérieuses, motivées et disponibles, souhaitant s’investir durablement dans le développement du serveur.\n\n' +
@@ -1795,9 +1932,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
             ) {
 
                 if (
-                    !executor?.permissions.has(
-                        PermissionFlagsBits.ManageMessages
-                    )
+                    !hasCommandAccess(message.__slashCommand.interaction, executor)
                 ) {
 
                     return message.reply(
@@ -1910,9 +2045,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
             ) {
 
                 if (
-                    !executor?.permissions.has(
-                        PermissionFlagsBits.ManageMessages
-                    )
+                    !hasCommandAccess(message.__slashCommand.interaction, executor)
                 ) {
 
                     return message.reply(
@@ -2026,8 +2159,18 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                 '❌ Erreur messageCreate :',
                 error
             );
+
+            if (message.__slashCommand) {
+                await message.__slashCommand.interaction.editReply({
+                    content: '❌ Une erreur est survenue pendant l’exécution de la commande.'
+                }).catch(() => null);
+            }
         }
-    }
+};
+
+client.on(
+    'messageCreate',
+    handleMessageCreate
 );
 
 // ============================================================
@@ -2054,8 +2197,8 @@ client.on(
             saveEventState();
 
             await channel.setRateLimitPerUser(
-                EVENT_COOLDOWN_SECONDS,
-                'Événement : cooldown 1 minute'
+                eventState.cooldownSeconds,
+                'Événement : cooldown configuré'
             );
 
         } catch (error) {
@@ -2077,6 +2220,389 @@ client.on(
     async interaction => {
 
         try {
+
+            if (
+                interaction.isStringSelectMenu() &&
+                interaction.customId.startsWith('config_')
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.customId === 'config_action') {
+                    const action = interaction.values[0];
+
+                    if (action === 'acces') {
+                        const commandMenu = new StringSelectMenuBuilder()
+                            .setCustomId('config_access_command')
+                            .setPlaceholder('Choisir une commande')
+                            .addOptions(ACCESS_CONTROL_COMMANDS.map(name => ({
+                                label: `/${name}`,
+                                value: name
+                            })));
+
+                        return interaction.update({
+                            content: 'Choisis la commande à autoriser à un rôle :',
+                            components: [new ActionRowBuilder().addComponents(commandMenu)]
+                        });
+                    }
+
+                    if (action === 'cooldown') {
+                        const channelMenu = new ChannelSelectMenuBuilder()
+                            .setCustomId('config_cooldown_channel')
+                            .setPlaceholder('Choisir un salon publicitaire')
+                            .setChannelTypes(ChannelType.GuildText);
+
+                        return interaction.update({
+                            content: 'Choisis le salon publicitaire à configurer :',
+                            components: [new ActionRowBuilder().addComponents(channelMenu)]
+                        });
+                    }
+
+                    const messageMenu = new StringSelectMenuBuilder()
+                        .setCustomId('config_message_type')
+                        .setPlaceholder('Choisir le message à personnaliser')
+                        .addOptions(
+                            { label: 'Vérification des publicités', value: 'pub' },
+                            { label: 'Formulaire de recrutement', value: 'recrutement' },
+                            { label: 'Formulaire de changement de grade', value: 'changement-grade' }
+                        );
+
+                    return interaction.update({
+                        content: 'Choisis le message à personnaliser :',
+                        components: [new ActionRowBuilder().addComponents(messageMenu)]
+                    });
+                }
+
+                if (interaction.customId === 'config_access_command') {
+                    const commandName = interaction.values[0];
+                    const roleMenu = new RoleSelectMenuBuilder()
+                        .setCustomId(`config_access_role:${commandName}`)
+                        .setPlaceholder('Choisir le rôle autorisé')
+                        .setMinValues(1)
+                        .setMaxValues(1);
+                    const clearButton = new ButtonBuilder()
+                        .setCustomId(`config_access_clear:${commandName}`)
+                        .setLabel('Retirer l’exception')
+                        .setStyle(ButtonStyle.Secondary);
+
+                    return interaction.update({
+                        content: `Choisis le rôle qui pourra utiliser **/${commandName}** sans être administrateur :`,
+                        components: [
+                            new ActionRowBuilder().addComponents(roleMenu),
+                            new ActionRowBuilder().addComponents(clearButton)
+                        ]
+                    });
+                }
+
+                if (interaction.customId === 'config_message_type') {
+                    const messageType = interaction.values[0];
+                    const input = new TextInputBuilder()
+                        .setCustomId('message')
+                        .setLabel('Texte du message')
+                        .setStyle(TextInputStyle.Paragraph)
+                        .setMaxLength(1000)
+                        .setRequired(true);
+
+                    return interaction.showModal(
+                        new ModalBuilder()
+                            .setCustomId(`config_message:${messageType}`)
+                            .setTitle('Personnaliser un message')
+                            .addComponents(new ActionRowBuilder().addComponents(input))
+                    );
+                }
+
+                return;
+            }
+
+            if (
+                interaction.isRoleSelectMenu() &&
+                interaction.customId.startsWith('config_access_role:')
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                const commandName = interaction.customId.split(':')[1];
+                getGuildConfig(interaction.guildId).roleByCommand[commandName] = interaction.values[0];
+                saveGuildConfig();
+
+                return interaction.update({
+                    content: `✅ Le rôle <@&${interaction.values[0]}> peut maintenant utiliser **/${commandName}**.`,
+                    components: []
+                });
+            }
+
+            if (
+                interaction.isChannelSelectMenu() &&
+                interaction.customId === 'config_cooldown_channel'
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                const channelId = interaction.values[0];
+                const channel = interaction.guild.channels.cache.get(channelId);
+
+                if (channel?.parentId !== PUB_CATEGORY_ID) {
+                    return interaction.update({
+                        content: '❌ Ce salon ne se trouve pas dans la catégorie des publicités.',
+                        components: []
+                    });
+                }
+
+                const input = new TextInputBuilder()
+                    .setCustomId('minutes')
+                    .setLabel('Cooldown par défaut en minutes (0 à 360)')
+                    .setStyle(TextInputStyle.Short)
+                    .setMaxLength(3)
+                    .setRequired(true);
+
+                return interaction.showModal(
+                    new ModalBuilder()
+                        .setCustomId(`config_cooldown:${channelId}`)
+                        .setTitle('Cooldown par défaut')
+                        .addComponents(new ActionRowBuilder().addComponents(input))
+                );
+            }
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith('config_access_clear:')
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                const commandName = interaction.customId.split(':')[1];
+                delete getGuildConfig(interaction.guildId).roleByCommand[commandName];
+                saveGuildConfig();
+
+                return interaction.update({
+                    content: `✅ L’accès à **/${commandName}** est de nouveau réservé aux administrateurs.`,
+                    components: []
+                });
+            }
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith('config_')
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.customId.startsWith('config_cooldown:')) {
+                    const channelId = interaction.customId.split(':')[1];
+                    const minutes = Number(interaction.fields.getTextInputValue('minutes'));
+
+                    if (!Number.isInteger(minutes) || minutes < 0 || minutes > 360) {
+                        return interaction.reply({
+                            content: '❌ Indique un nombre entier entre 0 et 360 minutes.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    getGuildConfig(interaction.guildId).defaultCooldowns[channelId] = minutes * 60;
+                    saveGuildConfig();
+
+                    return interaction.reply({
+                        content: `✅ Le cooldown par défaut de <#${channelId}> est réglé sur **${minutes} minute(s)**.`,
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.customId.startsWith('config_message:')) {
+                    const messageType = interaction.customId.split(':')[1];
+                    const message = interaction.fields.getTextInputValue('message').trim();
+                    getGuildConfig(interaction.guildId).messages[messageType] = message;
+                    saveGuildConfig();
+
+                    return interaction.reply({
+                        content: '✅ Le message a été enregistré.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+            }
+
+            if (interaction.isChatInputCommand()) {
+
+                if (
+                    !SLASH_COMMANDS.some(
+                        command => command.name === interaction.commandName
+                    )
+                ) {
+                    return;
+                }
+
+                if (!interaction.guild) {
+                    return interaction.reply({
+                        content: '❌ Cette commande doit être utilisée sur un serveur.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                const member = await interaction.guild.members
+                    .fetch(interaction.user.id)
+                    .catch(() => null);
+                const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+
+                if (
+                    (interaction.commandName === 'config' && !isAdmin) ||
+                    (interaction.commandName !== 'config' && !hasCommandAccess(interaction, member))
+                ) {
+                    return interaction.reply({
+                        content: '❌ Cette commande est réservée aux administrateurs ou au rôle autorisé dans /config.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.commandName === 'config') {
+                    const menu = new StringSelectMenuBuilder()
+                        .setCustomId('config_action')
+                        .setPlaceholder('Choisir un réglage')
+                        .addOptions(
+                            { label: 'Accès aux commandes', value: 'acces' },
+                            { label: 'Cooldowns par défaut', value: 'cooldown' },
+                            { label: 'Messages personnalisés', value: 'message' }
+                        );
+
+                    return interaction.reply({
+                        content: '⚙️ **Configuration du serveur**',
+                        components: [new ActionRowBuilder().addComponents(menu)],
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.commandName === 'help') {
+                    return interaction.reply({
+                        content: [
+                            '**Commandes Ultra Pub**',
+                            '`/promotion` : modifier les grades d’un membre.',
+                            '`/env-form-rc` et `/env-form-chgd` : publier les formulaires.',
+                            '`/event minutes` et `/reset-event` : gérer les cooldowns événementiels.',
+                            '`/config` : configurer les rôles autorisés, les messages et les cooldowns.',
+                            '`/message-boutique`, `/partenariat send`, `/staff-stat`, `/stats-pub`.'
+                        ].join('\n'),
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                if (interaction.commandName === 'promotion') {
+                    const rawId = interaction.options.getString('id').trim();
+                    const memberId = rawId.match(/^<@!?(\d+)>$/)?.[1] || rawId;
+                    const target = /^\d+$/.test(memberId)
+                        ? await interaction.guild.members.fetch(memberId).catch(() => null)
+                        : null;
+                    const currentRole = interaction.options.getRole('grade-actuel');
+                    const newRole = interaction.options.getRole('nouveau-grade');
+                    const mode = interaction.options.getString('mode');
+                    const botMember = interaction.guild.members.me;
+
+                    if (!target) {
+                        return interaction.reply({
+                            content: '❌ ID ou mention de membre invalide.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    if (
+                        !botMember?.permissions.has(PermissionFlagsBits.ManageRoles) ||
+                        !target.manageable ||
+                        !currentRole.editable ||
+                        !newRole.editable ||
+                        currentRole.id === interaction.guild.id
+                    ) {
+                        return interaction.reply({
+                            content: '❌ Le bot ne peut pas gérer ce membre ou ces rôles. Vérifie sa permission **Gérer les rôles** et la hiérarchie des rôles.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    try {
+                        if (mode === 'remplacer' && target.roles.cache.has(currentRole.id)) {
+                            await target.roles.remove(currentRole);
+                        }
+                        await target.roles.add(newRole);
+
+                        return interaction.reply({
+                            content: `✅ Rôle **${newRole.name}** ${mode === 'remplacer' ? 'attribué à la place de' : 'ajouté à'} <@${target.id}>.`,
+                            flags: MessageFlags.Ephemeral
+                        });
+                    } catch (error) {
+                        console.error('Erreur /promotion :', error);
+                        return interaction.reply({
+                            content: '❌ Impossible de modifier les rôles de ce membre.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                }
+
+                const interactionChannel = interaction.channel;
+                const usesTargetChannel = [
+                    'env-form-rc',
+                    'env-form-chgd',
+                    'panel-recrutement',
+                    'panel-recrutemtent',
+                    'panel-dmdrank'
+                ].includes(interaction.commandName);
+                const commandChannel = usesTargetChannel
+                    ? interaction.options.getChannel('salon')
+                    : interactionChannel;
+
+                if (!commandChannel) {
+                    return interaction.reply({
+                        content: '❌ Salon cible introuvable.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+                const commandArgs =
+                    interaction.commandName === 'partenariat' &&
+                    interaction.options.getSubcommand(false) === 'send'
+                        ? ['send']
+                        : [];
+
+                await handleMessageCreate({
+                    __slashCommand: {
+                        interaction,
+                        commandName: interaction.commandName,
+                        args: commandArgs,
+                        minutes: interaction.options.getInteger('minutes')
+                    },
+                    guild: interaction.guild,
+                    member: member || {
+                        permissions: interaction.memberPermissions
+                    },
+                    author: interaction.user,
+                    channel: commandChannel,
+                    deletable: false,
+                    reply: (...args) => interaction.editReply(...args)
+                });
+
+                if (!interaction.replied) {
+                    await interaction.editReply('✅ Commande exécutée.');
+                }
+
+                return;
+            }
 
             // ====================================================
             // RECRUTEMENT — BOUTON PRINCIPAL

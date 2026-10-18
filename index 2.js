@@ -130,7 +130,9 @@ const CONFIG_FILE = path.join(__dirname, 'ultrapub-config.json');
 const DEFAULT_GUILD_CONFIG = {
     roleByCommand: {},
     messages: {},
-    defaultCooldowns: {}
+    defaultCooldowns: {},
+    promotionLogChannelId: null,
+    staffRoleId: null
 };
 const guildConfig = {};
 
@@ -139,7 +141,9 @@ function getGuildConfig(guildId) {
         guildConfig[guildId] = {
             roleByCommand: {},
             messages: {},
-            defaultCooldowns: {}
+            defaultCooldowns: {},
+            promotionLogChannelId: null,
+            staffRoleId: null
         };
     }
 
@@ -157,7 +161,9 @@ function loadGuildConfig() {
                     ...config,
                     roleByCommand: config.roleByCommand || {},
                     messages: config.messages || {},
-                    defaultCooldowns: config.defaultCooldowns || {}
+                    defaultCooldowns: config.defaultCooldowns || {},
+                    promotionLogChannelId: config.promotionLogChannelId || null,
+                    staffRoleId: config.staffRoleId || null
                 };
             }
         }
@@ -1832,6 +1838,39 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                 'staff-stat'
             ) {
 
+                await message.guild.members.fetch().catch(() => null);
+
+                const staffRoleId =
+                    getGuildConfig(message.guild.id).staffRoleId;
+                const staffRole = staffRoleId
+                    ? message.guild.roles.cache.get(staffRoleId)
+                    : null;
+                const staffMembers = staffRole
+                    ? message.guild.members.cache.filter(
+                        member => member.roles.cache.has(staffRole.id)
+                    )
+                    : [];
+                const staffLines = staffRole
+                    ? [...staffMembers.values()].map(
+                        member => `• ${member.displayName} (@${member.user.username})`
+                    )
+                    : [];
+                const staffChunks = [];
+                let currentStaffChunk = '';
+
+                for (const line of staffLines) {
+                    if (currentStaffChunk.length + line.length + 1 > 1800) {
+                        staffChunks.push(currentStaffChunk);
+                        currentStaffChunk = '';
+                    }
+
+                    currentStaffChunk += `${currentStaffChunk ? '\n' : ''}${line}`;
+                }
+
+                if (currentStaffChunk) {
+                    staffChunks.push(currentStaffChunk);
+                }
+
                 const stats =
                     getStaffStats(
                         message.author.id
@@ -1875,6 +1914,17 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                         )
                         .addFields(
                             {
+                                name: staffRole
+                                    ? `👥 Staff Ultra Pub (${staffMembers.size})`
+                                    : '👥 Staff Ultra Pub',
+                                value: staffRole
+                                    ? staffMembers.size
+                                        ? 'Liste complète envoyée ci-dessous.'
+                                        : '*Aucun membre ne possède ce rôle.*'
+                                    : '*Configure le rôle Staff Ultra Pub dans `/config`.*',
+                                inline: false
+                            },
+                            {
                                 name:
                                     '🤝 Partenariats effectués',
                                 value:
@@ -1913,11 +1963,20 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                         })
                         .setTimestamp();
 
-                return message.channel.send({
+                const report = await message.channel.send({
                     embeds: [
                         embed
                     ]
                 });
+
+                for (const [index, chunk] of staffChunks.entries()) {
+                    await message.channel.send({
+                        content: `${index === 0 ? `👥 **Staff Ultra Pub (${staffMembers.size})**\n` : ''}${chunk}`,
+                        allowedMentions: { parse: [] }
+                    });
+                }
+
+                return report;
             }
 
             // ====================================================
@@ -2262,6 +2321,31 @@ client.on(
                         });
                     }
 
+                    if (action === 'promotion-channel') {
+                        const channelMenu = new ChannelSelectMenuBuilder()
+                            .setCustomId('config_promotion_log_channel')
+                            .setPlaceholder('Choisir le salon du journal des promotions')
+                            .setChannelTypes(ChannelType.GuildText);
+
+                        return interaction.update({
+                            content: 'Choisis le salon où publier les promotions :',
+                            components: [new ActionRowBuilder().addComponents(channelMenu)]
+                        });
+                    }
+
+                    if (action === 'staff-role') {
+                        const roleMenu = new RoleSelectMenuBuilder()
+                            .setCustomId('config_staff_role')
+                            .setPlaceholder('Choisir le rôle Staff Ultra Pub')
+                            .setMinValues(1)
+                            .setMaxValues(1);
+
+                        return interaction.update({
+                            content: 'Choisis le rôle qui identifie les membres du staff :',
+                            components: [new ActionRowBuilder().addComponents(roleMenu)]
+                        });
+                    }
+
                     const messageMenu = new StringSelectMenuBuilder()
                         .setCustomId('config_message_type')
                         .setPlaceholder('Choisir le message à personnaliser')
@@ -2340,8 +2424,31 @@ client.on(
             }
 
             if (
+                interaction.isRoleSelectMenu() &&
+                interaction.customId === 'config_staff_role'
+            ) {
+                if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+                    return interaction.reply({
+                        content: '❌ Seuls les administrateurs peuvent modifier la configuration.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+
+                getGuildConfig(interaction.guildId).staffRoleId = interaction.values[0];
+                saveGuildConfig();
+
+                return interaction.update({
+                    content: `✅ Le rôle Staff Ultra Pub est maintenant <@&${interaction.values[0]}>.`,
+                    components: []
+                });
+            }
+
+            if (
                 interaction.isChannelSelectMenu() &&
-                interaction.customId === 'config_cooldown_channel'
+                [
+                    'config_cooldown_channel',
+                    'config_promotion_log_channel'
+                ].includes(interaction.customId)
             ) {
                 if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
                     return interaction.reply({
@@ -2352,6 +2459,23 @@ client.on(
 
                 const channelId = interaction.values[0];
                 const channel = interaction.guild.channels.cache.get(channelId);
+
+                if (interaction.customId === 'config_promotion_log_channel') {
+                    if (!channel?.isTextBased()) {
+                        return interaction.update({
+                            content: '❌ Choisis un salon textuel valide.',
+                            components: []
+                        });
+                    }
+
+                    getGuildConfig(interaction.guildId).promotionLogChannelId = channelId;
+                    saveGuildConfig();
+
+                    return interaction.update({
+                        content: `✅ Le journal des promotions sera publié dans <#${channelId}>.`,
+                        components: []
+                    });
+                }
 
                 if (channel?.parentId !== PUB_CATEGORY_ID) {
                     return interaction.update({
@@ -2479,7 +2603,9 @@ client.on(
                         .addOptions(
                             { label: 'Accès aux commandes', value: 'acces' },
                             { label: 'Cooldowns par défaut', value: 'cooldown' },
-                            { label: 'Messages personnalisés', value: 'message' }
+                            { label: 'Messages personnalisés', value: 'message' },
+                            { label: 'Salon du journal des promotions', value: 'promotion-channel' },
+                            { label: 'Rôle Staff Ultra Pub', value: 'staff-role' }
                         );
 
                     return interaction.reply({
@@ -2513,10 +2639,32 @@ client.on(
                     const newRole = interaction.options.getRole('nouveau-grade');
                     const mode = interaction.options.getString('mode');
                     const botMember = interaction.guild.members.me;
+                    const promotionLogChannelId =
+                        getGuildConfig(interaction.guild.id).promotionLogChannelId;
+                    const promotionLogChannel = promotionLogChannelId
+                        ? await interaction.guild.channels.fetch(promotionLogChannelId).catch(() => null)
+                        : null;
 
                     if (!target) {
                         return interaction.reply({
                             content: '❌ ID ou mention de membre invalide.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    if (!promotionLogChannel?.isTextBased()) {
+                        return interaction.reply({
+                            content: '❌ Configure d’abord le salon du journal des promotions dans `/config`.',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+
+                    if (
+                        !botMember ||
+                        !promotionLogChannel.permissionsFor(botMember)?.has(PermissionFlagsBits.SendMessages)
+                    ) {
+                        return interaction.reply({
+                            content: '❌ Le bot ne peut pas écrire dans le salon configuré pour les promotions.',
                             flags: MessageFlags.Ephemeral
                         });
                     }
@@ -2540,8 +2688,28 @@ client.on(
                         }
                         await target.roles.add(newRole);
 
+                        const removedGrade = mode === 'remplacer'
+                            ? `<@&${currentRole.id}>`
+                            : 'Aucun (grade actuel conservé)';
+                        const logSent = await promotionLogChannel.send({
+                            content:
+                                `> Pseudo Discord : ${target.user.username} (<@${target.id}>)\n` +
+                                `> Grade à mettre : <@&${newRole.id}>\n` +
+                                `> Grade à enlever : ${removedGrade}`,
+                            allowedMentions: {
+                                users: [target.id],
+                                roles: mode === 'remplacer'
+                                    ? [currentRole.id, newRole.id]
+                                    : [newRole.id]
+                            }
+                        }).then(() => true).catch(error => {
+                            console.error('Erreur envoi du journal /promotion :', error);
+                            return false;
+                        });
+
                         return interaction.reply({
-                            content: `✅ Rôle **${newRole.name}** ${mode === 'remplacer' ? 'attribué à la place de' : 'ajouté à'} <@${target.id}>.`,
+                            content: `✅ Rôle **${newRole.name}** ${mode === 'remplacer' ? 'attribué à la place de' : 'ajouté à'} <@${target.id}>.` +
+                                (logSent ? '' : ' ⚠️ Le journal n’a pas pu être envoyé dans le salon configuré.'),
                             flags: MessageFlags.Ephemeral
                         });
                     } catch (error) {

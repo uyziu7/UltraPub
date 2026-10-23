@@ -111,7 +111,14 @@ const SLASH_COMMANDS = [
         ),
     new SlashCommandBuilder()
         .setName('staff-stat')
-        .setDescription('Afficher les statistiques du staff.'),
+        .setDescription('Afficher les statistiques du staff.')
+        .addStringOption(option =>
+            option
+                .setName('membre')
+                .setDescription('Afficher les statistiques d’un membre du staff.')
+                .setAutocomplete(true)
+                .setRequired(false)
+        ),
     new SlashCommandBuilder()
         .setName('partenariat')
         .setDescription('Gérer les partenariats.')
@@ -120,10 +127,7 @@ const SLASH_COMMANDS = [
         ),
     new SlashCommandBuilder()
         .setName('stats-pub')
-        .setDescription('Afficher les statistiques de vérification des publicités.'),
-    new SlashCommandBuilder()
-        .setName('statspub')
-        .setDescription('Ancien alias de /stats-pub.')
+        .setDescription('Afficher les statistiques de vérification des publicités.')
 ].map(command => command.setDefaultMemberPermissions(null).toJSON());
 
 const CONFIG_FILE = path.join(__dirname, 'ultrapub-config.json');
@@ -1042,6 +1046,13 @@ client.once(
                     await obsoleteEventCommand.delete();
                 }
 
+                const obsoleteStatsPubCommand =
+                    registeredCommands.find(command => command.name === 'statspub');
+
+                if (obsoleteStatsPubCommand) {
+                    await obsoleteStatsPubCommand.delete();
+                }
+
                 for (const commandData of SLASH_COMMANDS) {
                     const existingCommand =
                         registeredCommands.find(
@@ -1838,42 +1849,32 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                 'staff-stat'
             ) {
 
-                await message.guild.members.fetch().catch(() => null);
-
+                const interaction = message.__slashCommand.interaction;
+                const selectedMemberId = interaction.options.getString('membre');
                 const staffRoleId =
                     getGuildConfig(message.guild.id).staffRoleId;
                 const staffRole = staffRoleId
                     ? message.guild.roles.cache.get(staffRoleId)
                     : null;
-                const staffMembers = staffRole
-                    ? message.guild.members.cache.filter(
-                        member => member.roles.cache.has(staffRole.id)
-                    )
-                    : [];
-                const staffLines = staffRole
-                    ? [...staffMembers.values()].map(
-                        member => `• ${member.displayName} (@${member.user.username})`
-                    )
-                    : [];
-                const staffChunks = [];
-                let currentStaffChunk = '';
+                const targetMember = selectedMemberId
+                    ? await message.guild.members.fetch(selectedMemberId).catch(() => null)
+                    : await message.guild.members.fetch(message.author.id).catch(() => null);
 
-                for (const line of staffLines) {
-                    if (currentStaffChunk.length + line.length + 1 > 1800) {
-                        staffChunks.push(currentStaffChunk);
-                        currentStaffChunk = '';
-                    }
-
-                    currentStaffChunk += `${currentStaffChunk ? '\n' : ''}${line}`;
+                if (!staffRole) {
+                    return message.reply(
+                        '❌ Configure le rôle Staff Ultra Pub dans `/config` avant d’utiliser cette commande.'
+                    );
                 }
 
-                if (currentStaffChunk) {
-                    staffChunks.push(currentStaffChunk);
+                if (!targetMember || !targetMember.roles.cache.has(staffRole.id)) {
+                    return message.reply(
+                        '❌ Le membre sélectionné ne possède pas le rôle Staff Ultra Pub configuré.'
+                    );
                 }
 
                 const stats =
                     getStaffStats(
-                        message.author.id
+                        targetMember.id
                     );
 
                 let voiceSeconds =
@@ -1881,7 +1882,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
 
                 const activeVoiceStart =
                     voiceSessions.get(
-                        message.author.id
+                        targetMember.id
                     );
 
                 if (
@@ -1906,24 +1907,13 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                             '#5865F2'
                         )
                         .setThumbnail(
-                            message.author.displayAvatarURL()
+                            targetMember.displayAvatarURL()
                         )
                         .setDescription(
-                            `**Membre :** ${message.author}\n` +
+                            `**Membre :** ${targetMember}\n` +
                             `**Période :** Depuis le dernier redémarrage du bot`
                         )
                         .addFields(
-                            {
-                                name: staffRole
-                                    ? `👥 Staff Ultra Pub (${staffMembers.size})`
-                                    : '👥 Staff Ultra Pub',
-                                value: staffRole
-                                    ? staffMembers.size
-                                        ? 'Liste complète envoyée ci-dessous.'
-                                        : '*Aucun membre ne possède ce rôle.*'
-                                    : '*Configure le rôle Staff Ultra Pub dans `/config`.*',
-                                inline: false
-                            },
                             {
                                 name:
                                     '🤝 Partenariats effectués',
@@ -1968,13 +1958,6 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
                         embed
                     ]
                 });
-
-                for (const [index, chunk] of staffChunks.entries()) {
-                    await message.channel.send({
-                        content: `${index === 0 ? `👥 **Staff Ultra Pub (${staffMembers.size})**\n` : ''}${chunk}`,
-                        allowedMentions: { parse: [] }
-                    });
-                }
 
                 return report;
             }
@@ -2098,9 +2081,7 @@ Ouvre un ticket dans la boutique et indique simplement l’offre que tu souhaite
 
             if (
                 commandName ===
-                    'stats-pub' ||
-                commandName ===
-                    'statspub'
+                    'stats-pub'
             ) {
 
                 if (
@@ -2562,6 +2543,46 @@ client.on(
                         flags: MessageFlags.Ephemeral
                     });
                 }
+            }
+
+            if (interaction.isAutocomplete()) {
+                if (interaction.commandName !== 'staff-stat' || !interaction.guild) {
+                    return;
+                }
+
+                const staffRoleId =
+                    getGuildConfig(interaction.guild.id).staffRoleId;
+                const staffRole = staffRoleId
+                    ? interaction.guild.roles.cache.get(staffRoleId)
+                    : null;
+
+                if (!staffRole) {
+                    return interaction.respond([]);
+                }
+
+                const member = await interaction.guild.members
+                    .fetch(interaction.user.id)
+                    .catch(() => null);
+
+                if (!hasCommandAccess(interaction, member)) {
+                    return interaction.respond([]);
+                }
+
+                const focused = String(interaction.options.getFocused()).toLocaleLowerCase();
+                const choices = [...staffRole.members.values()]
+                    .filter(candidate =>
+                        !focused ||
+                        candidate.displayName.toLocaleLowerCase().includes(focused) ||
+                        candidate.user.username.toLocaleLowerCase().includes(focused)
+                    )
+                    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+                    .slice(0, 25)
+                    .map(candidate => ({
+                        name: `${candidate.displayName} (@${candidate.user.username})`.slice(0, 100),
+                        value: candidate.id
+                    }));
+
+                return interaction.respond(choices);
             }
 
             if (interaction.isChatInputCommand()) {
@@ -4211,12 +4232,13 @@ client.on(
                     ).pubsVerified++;
 
                     await interaction.message
-                        .edit({
-                            components: []
-                        })
-                        .catch(
-                            () => null
-                        );
+                        .delete()
+                        .catch(error => {
+                            console.error(
+                                'Suppression du message de vérification accepté impossible :',
+                                error
+                            );
+                        });
 
                     const logChannel =
                         await fetchTextChannel(
